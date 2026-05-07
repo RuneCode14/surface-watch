@@ -192,17 +192,27 @@ def save_scan_results(path: Path, scan_id: int, results: Iterable[ScanResult]) -
 
 
 def get_previous_successful_scan_id(path: Path, current_scan_id: int) -> int | None:
+    return get_previous_successful_scan_id_for_config(path, current_scan_id)
+
+
+def get_previous_successful_scan_id_for_config(
+    path: Path,
+    current_scan_id: int,
+    *,
+    config_hash: str | None = None,
+) -> int | None:
     with _connect(path) as connection:
-        row = connection.execute(
-            """
+        query = """
             SELECT id
             FROM scans
             WHERE id < ? AND status = 'success'
-            ORDER BY id DESC
-            LIMIT 1
-            """,
-            (current_scan_id,),
-        ).fetchone()
+        """
+        parameters: list[object] = [current_scan_id]
+        if config_hash is not None:
+            query += " AND config_hash = ?"
+            parameters.append(config_hash)
+        query += " ORDER BY id DESC LIMIT 1"
+        row = connection.execute(query, parameters).fetchone()
     return None if row is None else int(row["id"])
 
 

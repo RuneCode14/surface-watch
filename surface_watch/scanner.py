@@ -3,15 +3,18 @@ from __future__ import annotations
 import logging
 import os
 import platform
+import re
 import shutil
 import subprocess
 import xml.etree.ElementTree as ET
+from ipaddress import ip_address
 from pathlib import Path
 
 from surface_watch.config import SurfaceWatchConfig
 from surface_watch.models import DiscoveredTarget, PortFinding, ScanResult, utc_now
 
 LOGGER = logging.getLogger(__name__)
+_DURATION_PART_RE = re.compile(r"(\d+)(ms|s|m|h|d)?", re.IGNORECASE)
 
 
 def scan_targets(targets: list[DiscoveredTarget], config: SurfaceWatchConfig) -> list[ScanResult]:
@@ -56,6 +59,7 @@ def scan_target(
 
     stdout = process.stdout or ""
     stderr = (process.stderr or "").strip()
+    elapsed_seconds = (finished_at - started_at).total_seconds()
 
     try:
         parsed_ips, open_ports = parse_nmap_xml(stdout)
@@ -78,13 +82,14 @@ def scan_target(
     for finding in open_ports:
         if not finding.ip:
             finding.ip = target.ip
-    status = "success"
-    error = stderr or None
-    if process.returncode != 0 and open_ports:
-        status = "partial"
-    elif process.returncode != 0:
-        status = "failed"
-        error = stderr or f"nmap exited with return code {process.returncode}"
+    status, error = _classify_scan_result(
+        process_returncode=process.returncode,
+        stderr=stderr,
+        parsed_ips=parsed_ips,
+        open_ports=open_ports,
+        elapsed_seconds=elapsed_seconds,
+        host_timeout=config.scanning.timing.host_timeout,
+    )
 
     return ScanResult(
         target=target.hostname or target.ip,
@@ -104,6 +109,8 @@ def build_nmap_command(nmap_binary: str, config: SurfaceWatchConfig, target: str
         raise ValueError(f"Unsupported scan mode for v1: {config.scanning.scan_mode}")
 
     command = [nmap_binary]
+    if _is_ipv6_target(target):
+        command.append("-6")
 
     default_args = list(config.scanning.default_args)
     for flag in ("-Pn", "--open"):
@@ -219,3 +226,120 @@ def _parse_confidence(value: str | None) -> int | None:
     if value is None or not value.strip():
         return None
     return int(value)
+
+
+def _classify_scan_result(
+    *,
+    process_returncode: int,
+    stderr: str,
+    parsed_ips: list[str],
+    open_ports: list[PortFinding],
+    elapsed_seconds: float,
+    host_timeout: str,
+) -> tuple[str, str | None]:
+    if process_returncode != 0:
+        if open_ports:
+            return ("partial", stderr or f"nmap exited with return code {process_returncode}")
+        return ("failed", stderr or f"nmap exited with return code {process_returncode}")
+
+    if _stderr_indicates_invalid_target(stderr):
+        return (
+            "failed",
+            _combine_error_details(
+                stderr,
+                "nmap did not scan the target successfully; refusing to record a zero-host result as success.",
+            ),
+        )
+
+    if _likely_hit_host_timeout(elapsed_seconds, host_timeout):
+        if open_ports:
+            return (
+                "partial",
+                _combine_error_details(
+                    stderr,
+                    f"nmap likely hit --host-timeout {host_timeout}; recording the host result as partial.",
+                ),
+            )
+        return (
+            "failed",
+            _combine_error_details(
+                stderr,
+                f"nmap likely hit --host-timeout {host_timeout}; refusing to record a successful zero-port result.",
+            ),
+        )
+
+    if stderr and not parsed_ips and not open_ports:
+        return ("failed", stderr)
+
+    return ("success", stderr or None)
+
+
+def _stderr_indicates_invalid_target(stderr: str) -> bool:
+    normalized = stderr.lower()
+    return any(
+        pattern in normalized
+        for pattern in (
+            "0 hosts scanned",
+            "no targets were specified",
+            "looks like an ipv6 target specification",
+            "you have to use the -6 option",
+        )
+    )
+
+
+def _likely_hit_host_timeout(elapsed_seconds: float, host_timeout: str) -> bool:
+    timeout_seconds = _parse_duration_seconds(host_timeout)
+    if timeout_seconds is None or timeout_seconds <= 0:
+        return False
+    tolerance_seconds = min(5.0, max(1.0, timeout_seconds * 0.01))
+    return elapsed_seconds >= max(0.0, timeout_seconds - tolerance_seconds)
+
+
+def _parse_duration_seconds(value: str) -> float | None:
+    normalized = value.strip().lower()
+    if not normalized:
+        return None
+
+    total_seconds = 0.0
+    position = 0
+    for match in _DURATION_PART_RE.finditer(normalized):
+        if match.start() != position:
+            return None
+        position = match.end()
+        amount = int(match.group(1))
+        unit = (match.group(2) or "s").lower()
+        multiplier = {
+            "ms": 0.001,
+            "s": 1.0,
+            "m": 60.0,
+            "h": 3600.0,
+            "d": 86400.0,
+        }.get(unit)
+        if multiplier is None:
+            return None
+        total_seconds += amount * multiplier
+
+    if position != len(normalized):
+        return None
+    return total_seconds
+
+
+def _combine_error_details(*parts: str) -> str | None:
+    messages: list[str] = []
+    seen: set[str] = set()
+    for part in parts:
+        normalized = part.strip()
+        if not normalized or normalized in seen:
+            continue
+        messages.append(normalized)
+        seen.add(normalized)
+    if not messages:
+        return None
+    return "\n".join(messages)
+
+
+def _is_ipv6_target(value: str) -> bool:
+    try:
+        return ip_address(value).version == 6
+    except ValueError:
+        return False

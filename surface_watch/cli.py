@@ -28,6 +28,7 @@ from surface_watch.storage import (
     create_scan,
     finish_scan,
     get_previous_successful_scan_id,
+    get_previous_successful_scan_id_for_config,
     initialize_database,
     list_scans,
     load_changes,
@@ -253,13 +254,14 @@ def _run_scan(args: argparse.Namespace) -> int:
     config = load_config(args.config)
     configure_logging(config.project.log_level)
     initialize_database(config.project.database_path)
+    config_hash = compute_config_hash(config)
 
     started_at = _utc_now()
     scan_id = create_scan(
         config.project.database_path,
         started_at=started_at,
         status="running",
-        config_hash=compute_config_hash(config),
+        config_hash=config_hash,
         tool_version=__version__,
     )
 
@@ -283,7 +285,11 @@ def _run_scan(args: argparse.Namespace) -> int:
         save_scan_results(config.project.database_path, scan_id, results)
 
         final_status = _determine_scan_status(results)
-        previous_scan_id = get_previous_successful_scan_id(config.project.database_path, scan_id)
+        previous_scan_id = get_previous_successful_scan_id_for_config(
+            config.project.database_path,
+            scan_id,
+            config_hash=config_hash,
+        )
         if previous_scan_id is not None:
             current_snapshot = load_scan_snapshot(config.project.database_path, scan_id)
             previous_snapshot = load_scan_snapshot(config.project.database_path, previous_scan_id)
@@ -310,7 +316,14 @@ def _run_scan(args: argparse.Namespace) -> int:
     print(f"Host scans: {len(results)}")
     print(f"Detected changes: {len(detected_changes)}")
     if previous_scan_id is None:
-        print("No previous successful scan available; current run established the baseline.")
+        any_previous_success = get_previous_successful_scan_id(config.project.database_path, scan_id)
+        if any_previous_success is None:
+            print("No previous successful scan available; current run established the baseline.")
+        else:
+            print(
+                "No previous successful scan with a matching config hash is available; "
+                "current run established a new baseline."
+            )
     if notified_providers:
         print(f"Notifications sent via: {', '.join(notified_providers)}")
     return 0 if final_status in {"success", "partial", "discovery_only"} else 1

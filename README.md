@@ -231,6 +231,7 @@ For TCP scans, the command is built around:
 - `-Pn`
 - `--open`
 - `-p <configured ports>`
+- `-6` automatically for IPv6 targets
 - `-sS` when running as root on Linux/macOS, otherwise `-sT`
 - `-sV` when service detection is enabled
 - `--version-intensity <value>`
@@ -241,6 +242,9 @@ For TCP scans, the command is built around:
 `surface-watch` parses `nmap` XML output into internal structured models before storing or diffing results.
 
 If one host fails, the run continues for the remaining hosts. A run is only marked fully failed when all host scans fail.
+Hosts that appear to hit `--host-timeout`, or that yield an invalid zero-host result such as
+an IPv6 target scanned without `-6`, are downgraded to `failed` or `partial` instead of being
+stored as a clean success.
 
 ## Why Full TCP Scanning Is the Default
 
@@ -282,7 +286,7 @@ surface-watch show-changes --config config.yaml --scan-id 2
 
 ## How Change Detection Works
 
-The default comparison baseline is the previous successful scan.
+The default comparison baseline is the previous successful scan with the same stored config hash.
 
 Detection is based on normalized internal tuples:
 
@@ -294,7 +298,7 @@ Important behavior:
 
 - failed scans are stored
 - partial scans are stored
-- comparisons default to the previous successful scan
+- comparisons default to the previous successful scan with a matching config hash
 - empty and missing service fields are treated consistently to reduce false noise
 - missing version strings do not automatically produce version-change events
 

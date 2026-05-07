@@ -9,6 +9,7 @@ from surface_watch.storage import (
     create_scan,
     finish_scan,
     get_previous_successful_scan_id,
+    get_previous_successful_scan_id_for_config,
     initialize_database,
     list_scans,
     load_changes,
@@ -110,6 +111,22 @@ def test_storage_round_trip(tmp_path: Path) -> None:
     )
 
     assert get_previous_successful_scan_id(database_path, second_scan_id) == first_scan_id
+    assert (
+        get_previous_successful_scan_id_for_config(
+            database_path,
+            second_scan_id,
+            config_hash="hash-2",
+        )
+        is None
+    )
+    assert (
+        get_previous_successful_scan_id_for_config(
+            database_path,
+            second_scan_id,
+            config_hash="hash-1",
+        )
+        == first_scan_id
+    )
 
     snapshot = load_scan_snapshot(database_path, first_scan_id)
     assert snapshot.status == "success"
