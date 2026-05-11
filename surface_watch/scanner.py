@@ -108,7 +108,11 @@ def build_nmap_command(nmap_binary: str, config: SurfaceWatchConfig, target: str
     if config.scanning.scan_mode != "full_tcp":
         raise ValueError(f"Unsupported scan mode for v1: {config.scanning.scan_mode}")
 
-    command = [nmap_binary]
+    if not _can_use_syn_scan(nmap_binary) and _nmap_sudo_works(nmap_binary):
+        command = ["sudo", nmap_binary]
+    else:
+        command = [nmap_binary]
+
     if _is_ipv6_target(target):
         command.append("-6")
 
@@ -118,8 +122,9 @@ def build_nmap_command(nmap_binary: str, config: SurfaceWatchConfig, target: str
             default_args.append(flag)
     command.extend(default_args)
 
-    command.append("-sS" if _can_use_syn_scan(nmap_binary) else "-sT")
-    command.extend(["-p", config.scanning.ports.tcp])
+    command.append("-sS" if _can_use_syn_scan(nmap_binary) or _nmap_sudo_works(nmap_binary) else "-sT")
+    if config.scanning.ports.tcp:
+        command.extend(["-p", config.scanning.ports.tcp])
     command.extend(["--max-retries", str(config.scanning.timing.max_retries)])
     command.extend(["--host-timeout", config.scanning.timing.host_timeout])
     command.append(_normalize_timing_template(config.scanning.timing.template))
@@ -221,25 +226,8 @@ def _can_use_syn_scan(nmap_binary: str | None = None) -> bool:
     geteuid = getattr(os, "geteuid", None)
     if callable(geteuid) and geteuid() == 0:
         return True
-    # Check if the nmap binary has CAP_NET_RAW via file capabilities
-    if nmap_binary:
-        binary_path = nmap_binary
-        if not os.path.isabs(binary_path):
-            resolved = shutil.which(binary_path)
-            if resolved:
-                binary_path = resolved
-        try:
-            result = subprocess.run(
-                ["getcap", binary_path],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            if "cap_net_raw" in result.stdout:
-                return True
-        except (OSError, FileNotFoundError):
-            pass
-    # Fall back to testing the current process
+    # File capabilities on nmap are NOT sufficient — nmap enforces root check itself
+    # Fall back to testing the current process (e.g. inside a container with caps)
     try:
         import socket
 
@@ -248,6 +236,26 @@ def _can_use_syn_scan(nmap_binary: str | None = None) -> bool:
         return True
     except (OSError, PermissionError):
         return False
+
+
+def _nmap_sudo_works(nmap_binary: str | None = None) -> bool:
+    """Check if sudo nmap works (passwordless and nmap binary has raw socket caps)."""
+    if platform.system() not in {"Linux", "Darwin"}:
+        return False
+    # Verify sudo exists and passwordless nmap is allowed
+    try:
+        result = subprocess.run(
+            ["sudo", "-n", nmap_binary or "nmap", "--version"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+        if result.returncode != 0 or "password" in (result.stderr or "").lower():
+            return False
+    except (OSError, FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+    return True
 
 
 def _parse_confidence(value: str | None) -> int | None:
