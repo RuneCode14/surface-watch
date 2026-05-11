@@ -118,7 +118,7 @@ def build_nmap_command(nmap_binary: str, config: SurfaceWatchConfig, target: str
             default_args.append(flag)
     command.extend(default_args)
 
-    command.append("-sS" if _can_use_syn_scan() else "-sT")
+    command.append("-sS" if _can_use_syn_scan(nmap_binary) else "-sT")
     command.extend(["-p", config.scanning.ports.tcp])
     command.extend(["--max-retries", str(config.scanning.timing.max_retries)])
     command.extend(["--host-timeout", config.scanning.timing.host_timeout])
@@ -215,13 +215,31 @@ def _normalize_timing_template(value: str) -> str:
     return f"-T{normalized}"
 
 
-def _can_use_syn_scan() -> bool:
+def _can_use_syn_scan(nmap_binary: str | None = None) -> bool:
     if platform.system() not in {"Linux", "Darwin"}:
         return False
     geteuid = getattr(os, "geteuid", None)
     if callable(geteuid) and geteuid() == 0:
         return True
-    # Check for CAP_NET_RAW by attempting to create a raw socket
+    # Check if the nmap binary has CAP_NET_RAW via file capabilities
+    if nmap_binary:
+        binary_path = nmap_binary
+        if not os.path.isabs(binary_path):
+            resolved = shutil.which(binary_path)
+            if resolved:
+                binary_path = resolved
+        try:
+            result = subprocess.run(
+                ["getcap", binary_path],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if "cap_net_raw" in result.stdout:
+                return True
+        except (OSError, FileNotFoundError):
+            pass
+    # Fall back to testing the current process
     try:
         import socket
 
